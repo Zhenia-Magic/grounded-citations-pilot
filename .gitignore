@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+.env
+# Everything under data/ stays private: third-party article text and PDFs, harvested
+# metadata, model verdicts on identifiable papers and the blind hand-check kit.
+data/
+*.log
+results/*_stdout.txt
