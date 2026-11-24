@@ -40,7 +40,7 @@ def boot(df, num, den, reps=2000):
 
 def fmt(t):
     est, lo, hi = t
-    return "n/a" if np.isnan(est) else f"{100 * est:.0f}% ({100 * lo:.0f}–{100 * hi:.0f}%)"
+    return "n/a" if np.isnan(est) else f"{100 * est:.0f}% ({100 * lo:.0f}-{100 * hi:.0f}%)"
 
 
 def main():
@@ -67,29 +67,32 @@ def main():
     C["one"] = 1
     U = C[C["article_id"].isin(usable)].copy()
 
-    L = ["# Day 2: can the citations be judged at all?", "",
-         "Pipeline: GROBID 0.9.1 (CRF models) on the Day-1 PDFs, citation links checked against the "
-         "callouts, references resolved through Crossref and OpenAlex. Intervals resample whole articles.", "",
-         "## Article funnel", "",
-         "| Stage | English stratum | Spanish stratum | Total |", "|---|---|---|---|"]
+    n_journals = A["article_id"].str.split("__").str[0].nunique()
+    pdf_status = A["article_id"].map(lambda i: metas.get(i, {}).get("status"))
+    blocked = A.loc[pdf_status == "blocked_bot_protection", "article_id"].str.split("__").str[0].nunique()
+    L = ["# Day 2: how many citations can be checked?", "",
+         "The sampled articles were downloaded and turned into text with GROBID 0.9.1, and each in-text "
+         "citation was linked to its reference. The cited works were looked up in Crossref and OpenAlex. "
+         "Intervals resample whole articles.", "",
+         "## Which articles could be used", "",
+         "| Stage | English journals | Spanish journals | Total |", "|---|---|---|---|"]
     def row(label, mask):
         en = int((mask & (A["lang_stratum"] == "EN")).sum())
         es = int((mask & (A["lang_stratum"] == "ES")).sum())
         L.append(f"| {label} | {en} | {es} | {en + es} |")
     row("Sampled", A["article_id"].notna())
     row("PDF downloaded", A["pdf_ok"])
-    row("Parsed with body text and a reference list", A["parsed"])
-    row("Citation links mostly resolvable (≥50% of callouts)", A["linked_ok"])
-    row("Body text in the stratum's language", A["linked_ok"] & A["lang_ok"])
+    row("Parsed into body text and a reference list", A["parsed"])
+    row("At least half the citations linked to a reference", A["linked_ok"])
+    row("Body text in the expected language", A["linked_ok"] & A["lang_ok"])
     lost_lang = A[A["linked_ok"] & ~A["lang_ok"]]
-    L += ["", f"Usable articles: {len(usable)}. "
-          f"{len(lost_lang)} parsed articles were in another language than their stratum "
-          f"({', '.join(sorted(lost_lang['body_lang_detected'].replace('', 'unknown')))}), all tagged as the "
-          "stratum language by their journals. Articles where linking failed mostly use footnote citation "
-          "styles, which GROBID reads as numbered callouts.", ""]
+    L += ["", f"{blocked} of the {n_journals} journals put their PDFs behind bot protection, although their "
+          "article lists were open. The script recorded this and did not get around it. Linking failed mostly "
+          f"in articles with footnote citations, and {len(lost_lang)} articles were in a different language from "
+          "the one their journals' records gave.", ""]
 
-    L += ["## What happens to each citation (usable articles)", "",
-          f"{len(U):,} in-text citations in {U['article_id'].nunique()} articles.", "",
+    L += ["## What happens to each citation", "",
+          f"{len(U):,} in-text citations in the {U['article_id'].nunique()} usable articles:", "",
           "| Outcome | Citations | Share |", "|---|---|---|"]
     order = ["full_text_oa", "abstract_only", "metadata_only", "unresolved_book_or_report",
              "unresolved_web", "unresolved_other", "link_failed_check", "unlinked"]
@@ -99,67 +102,36 @@ def main():
         n = int((U["outcome"] == o).sum())
         L.append(f"| {labels[o]} | {n} | {100 * n / len(U):.0f}% |")
     L += ["",
-          f"- **Judgeable at all** (full text or abstract): {fmt(boot(U, 'judgeable', 'one'))} of citations.",
-          f"- **Judgeable against full text**: {fmt(boot(U, 'full', 'one'))}.",
-          f"- Abstract only, which can confirm support but never refute it: {fmt(boot(U, 'abstract', 'one'))}.",
-          f"- Citations in methods sections, which the design treats as cannot-judge by default: "
-          f"{100 * as_bool(U['methods_section']).mean():.0f}%.",
-          "- For comparison, the proposal's untested guess was 25–40% full text, 10–20% abstract only and "
-          "40–65% not judgeable.", ""]
+          f"- Can be checked at all (open full text or an abstract): {fmt(boot(U, 'judgeable', 'one'))}.",
+          f"- Can be checked against full text: {fmt(boot(U, 'full', 'one'))}.",
+          f"- Abstract only: {fmt(boot(U, 'abstract', 'one'))}. An abstract can confirm support but can't "
+          "show that it is missing.", ""]
 
-    L += ["## By language and field", "",
-          "| Group | Articles | Citations | Judgeable at all | Full text |", "|---|---|---|---|---|"]
-    for label, sub in ([("English stratum", U[U["lang_stratum"] == "EN"]),
-                        ("Spanish stratum", U[U["lang_stratum"] == "ES"])]
-                       + [(f, U[U["field"] == f]) for f in ("health", "scitech", "social", "humanities")]):
-        if len(sub):
-            L.append(f"| {label} | {sub['article_id'].nunique()} | {len(sub)} | "
-                     f"{fmt(boot(sub, 'judgeable', 'one'))} | {fmt(boot(sub, 'full', 'one'))} |")
-
-    P = R[as_bool(R["needed"])]
-    src = P["doi_source"].replace("", "none").value_counts()
-    L += ["", "## Cited works (references cited at least once in a usable article)", "",
-          f"- Distinct cited works: {len(P):,}. Across all parsed articles GROBID also produced "
-          f"{int((~as_bool(pd.read_csv('data/day2/references.csv', dtype=str)['ref_like'])).sum())} junk entries "
-          "such as checklist lines, which are excluded.",
-          f"- DOI printed in the reference: {src.get('in_reference', 0)}; found by Crossref search: "
-          f"{src.get('crossref_match', 0)}; no DOI found: {src.get('none', 0)}.",
-          "- Kinds as parsed: " + ", ".join(f"{k} {v}" for k, v in P["kind"].value_counts().items()) + ".",
-          f"- Open access per OpenAlex: {int(as_bool(P['is_oa']).sum())} of {int(as_bool(P['oa_found']).sum())} "
-          "resolved works.",
-          f"- Retracted works cited: {int(as_bool(P['is_retracted']).sum())}.", ""]
-    retracted = P[as_bool(P["is_retracted"])]
-    for r in retracted.itertuples():
-        L.append(f"  - {r.article_id}: {r.first_author} ({r.year}), {r.oa_title[:110]}")
-
-    L += ["", "## Caveats", "",
-          "- Open access means OpenAlex knows an open copy. Day 3 has to fetch those copies, and some "
-          "will be behind bot walls or dead links, so full-text shares here are upper bounds.",
-          "- Crossref matches had to agree on title and year or author, so some findable works count "
-          "as unresolved: precision was preferred to recall.",
-          "- GROBID ran with its light CRF models; its deep-learning models link more callouts but need "
-          "a 15 GB image.",
-          f"- Small sample: {len(usable)} usable articles from {A.loc[A['usable'], 'article_id'].str.split('__').str[0].nunique()} "
-          "journals, so per-field rows are indicative only."]
     inputs = Path("data/day3/ojs_inputs.jsonl")
-    if inputs.exists():  # retrieval check run during Day-3 prep on the sampled citations
+    if inputs.exists():  # added once Day-3 prep has tried to download the open copies
         items = [json.loads(l) for l in inputs.read_text(encoding="utf-8").splitlines() if l.strip()]
-        metas = list(json.loads(Path("data/day3/open_works.json").read_text()).values())
-        st = pd.Series([m["status"] for m in metas]).value_counts()
+        works = list(json.loads(Path("data/day3/open_works.json").read_text()).values())
+        st = pd.Series([m["status"] for m in works]).value_counts()
         ft = [i for i in items if i["day2_outcome"] == "full_text_oa"]
         got = sum(i["evidence"] == "full_text" for i in ft)
         share_ft = boot(U, "full", "one")[0]
-        L += ["", "## Retrieval check: can the open copies actually be fetched?", "",
-              f"For the {len(items)} citations prepared for judging, the open copies were fetched as a client "
-              "would: the OpenAlex PDF link, else the landing page's `citation_pdf_url` tag, respecting robots.txt.", "",
-              f"- Cited works listed as open access: {len(metas)}; PDF retrieved: {st.get('ok', 0)} "
-              f"({100 * st.get('ok', 0) / max(1, len(metas)):.0f}%); behind bot protection: "
-              f"{st.get('blocked_bot_protection', 0)}; no PDF found: {st.get('no_pdf', 0)}.",
-              f"- Sampled citations whose source OpenAlex lists as open: {len(ft)}; full text actually obtained "
-              f"for {got} ({100 * got / max(1, len(ft)):.0f}%); the rest fall back to the abstract where one exists.",
-              f"- Applied to the headline, citations judgeable against retrieved full text are roughly "
-              f"{100 * share_ft * got / max(1, len(ft)):.0f}% rather than {100 * share_ft:.0f}%. Publisher "
-              "text-mining access, Europe PMC and repository copies could close part of that gap.", ""]
+        L += ["## Can the open copies actually be downloaded?", "",
+              f"For {len(items)} sampled citations, a script tried to download each open copy the way any "
+              "outside tool would: the PDF link OpenAlex gives, or else the one on the article's page.", "",
+              f"- Of {len(works)} cited works listed as open access, {st.get('ok', 0)} were downloaded "
+              f"({100 * st.get('ok', 0) / max(1, len(works)):.0f}%). {st.get('blocked_bot_protection', 0)} were "
+              f"behind bot protection and {st.get('no_pdf', 0)} had no PDF to find.",
+              f"- Full text was obtained for {got} of the {len(ft)} citations whose source is listed as open "
+              f"({100 * got / max(1, len(ft)):.0f}%). The rest fall back to the abstract where there is one.",
+              f"- So only about {100 * share_ft * got / max(1, len(ft)):.0f}% of all citations can be checked "
+              f"against full text that a script can actually get, not {100 * share_ft:.0f}%.", ""]
+
+    L += ["## Caveats", "",
+          "- Crossref matches had to agree on title and year or author, so some findable works count as "
+          "unresolved.",
+          "- GROBID ran with its light models. Its larger deep-learning models link more citations.",
+          f"- Small sample: {len(usable)} usable articles from "
+          f"{A.loc[A['usable'], 'article_id'].str.split('__').str[0].nunique()} journals."]
     Path("results/day2_summary.md").write_text("\n".join(L) + "\n")
     U.to_csv("data/day2/contexts_usable.csv", index=False)
     print("\n".join(L))

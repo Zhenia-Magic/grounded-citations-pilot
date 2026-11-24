@@ -1,121 +1,91 @@
-# Grounded Citations: OJS citation-support pilot
+# Grounded Citations: OJS pilot
 
-A pilot for Grounded Citations, a tool that checks whether citations in open-access journal
-articles are supported by the sources they cite, and shows the excerpt behind each verdict.
-It measures how far an outside tool can do this, after publication, for journals running
-Open Journal Systems (OJS).
+Grounded Citations is a planned tool that checks whether the sources cited in a journal article
+support the sentences that cite them, and shows the passage it relied on. This pilot, run in
+November 2026, tested how well that works for open-access journals that use Open Journal Systems (OJS).
 
-## Results so far
+## What the pilot found
 
-- [Day 1](results/day1_summary.md): of 120 sampled OJS journals, 83% let a program list
-  their articles through OAI-PMH, and about 76% publish only PDFs.
-- [Day 2](results/day2_summary.md): of 1,081 in-text citations in 28 articles, 56% point to
-  an open text or abstract, but only about 23% could be checked against full text that a
-  script could actually fetch.
-- [Day 3](results/day3_summary.md): on 300 citations already labelled by experts
-  (Citation-Integrity), two AI judges' joint "supported" verdicts were right 81% of the
-  time and their joint "not accurate" flags only 30%. Details in
-  [day3_benchmark.md](results/day3_benchmark.md) and [day3_ojs.md](results/day3_ojs.md).
+- Most journals let a program list their articles. 100 of 120 sampled OJS journals (83%) do so
+  through OAI-PMH, a standard feed built into OJS.
+- Most publish full text only as PDF. About 76% have no HTML or XML version of their articles.
+- About a quarter of citations can be checked against the full source. Of 1,081 citations in
+  28 articles, 56% point to a source with an open full text or abstract, but only about 23% to
+  full text that a script could actually download.
+- AI judges can confirm support but are not yet good at finding problems. On 300 citations
+  already labelled by experts, when both judges (Claude Opus 5.5 and GPT-6.2 Sol) said a citation
+  was supported, the experts agreed 81% of the time. When both flagged a problem, the experts
+  agreed only 30% of the time.
+- Claude Opus 5.5 alone scored about as well as the best published system on that benchmark:
+  accuracy 0.63 against 0.59, and macro-F1 0.46 against 0.52.
+- The whole pilot cost $23.77 in API fees.
 
-## What is not in this repository
+More detail: [day 1](results/day1_summary.md) (journals), [day 2](results/day2_summary.md)
+(citations) and [day 3](results/day3_summary.md) (AI judges).
 
-- `data/`: third-party article PDFs and text, harvested metadata, the cited works' text,
-  the model verdicts on identifiable articles (kept private by the project's own rule that
-  no negative note is published before it is validated), and the blind hand-check kit.
-  The scripts below rebuild it from public sources.
-- API keys, which live in a git-ignored `.env`.
+## How it works
 
-Developed on Ubuntu (WSL2) with Python 3.12 via uv; GROBID runs in Docker.
+1. Draw 120 OJS journals at random from the DOAJ journal list and read their article lists.
+2. Download the PDFs of 50 sampled articles, turn them into text with GROBID and link each
+   in-text citation to its reference.
+3. Look up the cited works in Crossref and OpenAlex and download the open copies.
+4. Ask two AI judges whether each cited source supports the sentence that cites it. Every
+   verdict must quote the source, and the code checks each quote word for word.
+5. Score the judges against expert labels from the Citation-Integrity benchmark
+   (Sarol et al., 2024).
 
-## Day 1: sample and harvest (done 2026-11-21)
+## Run it
+
+You need Python 3.12, uv, Docker (for GROBID) and API keys for Anthropic and OpenAI. Put the keys
+in a file called `.env` in this folder (git ignores it):
+
+```
+ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
+```
+
+Then run each step from this folder:
 
 ```bash
 uv venv --python 3.12
-uv pip install requests defusedxml pandas py3langid
-curl -L -o data/raw/doaj/doaj_journalcsv_20261021_2320_utf8.csv https://doaj.org/csv  # ~26 MB
-.venv/bin/python src/sample_journals.py data/raw/doaj/doaj_journalcsv_20261021_2320_utf8.csv
-.venv/bin/python src/harvest_oai.py       # ~3 min; cached per journal under data/raw/oai/
-.venv/bin/python src/summarise_day1.py    # results/day1_summary.md and data/sample/*.csv
+uv pip install requests defusedxml pandas py3langid anthropic==2.12.0 openai==3.46.0
+PY=.venv/bin/python
+
+# Day 1: sample journals and list their articles
+curl -L --create-dirs -o data/raw/doaj/doaj.csv https://doaj.org/csv
+$PY src/sample_journals.py data/raw/doaj/doaj.csv
+$PY src/harvest_oai.py
+$PY src/summarise_day1.py
+
+# Day 2: download and parse the articles, find the cited works
+$PY src/fetch_pdfs.py
+bash scripts/start_grobid.sh
+$PY src/run_grobid.py
+$PY src/extract_contexts.py
+ONLY_NEEDED=1 $PY src/resolve_refs.py
+$PY src/summarise_day2.py
+$PY src/fetch_cited_texts.py
+$PY src/summarise_day2.py    # again, to add the download check
+
+# Day 3: judge, with each run capped at a budget in US dollars
+$PY src/get_ci_corpus.py
+$PY src/benchmark_ci.py
+$PY src/judge_claude.py data/day3/ci_inputs.jsonl --budget 12
+$PY src/judge_claude.py data/day3/ojs_inputs.jsonl --budget 8
+$PY src/judge_openai.py data/day3/ci_inputs.jsonl --budget 10
+$PY src/judge_openai.py data/day3/ojs_inputs.jsonl --budget 4
+$PY src/score_benchmark.py data/day3/judgments/claude-opus-5-5 data/day3/judgments/gpt-6.2-sol
+$PY src/summarise_day3.py data/day3/judgments/claude-opus-5-5 data/day3/judgments/gpt-6.2-sol
 ```
 
-The sample is seeded (20261121), so rerunning on the same DOAJ file gives the same journals.
-DOAJ's export changes monthly; keep the dated file for reproducibility.
+DOAJ updates its list, so a new download draws different journals. The pilot used
+`doaj_journalcsv_20261021_2320_utf8.csv`.
 
-## Day 2: fetch, parse, link and resolve (done 2026-11-21)
+## What is not here
 
-```bash
-.venv/bin/python src/fetch_pdfs.py          # PDFs into data/raw/pdf/ (RETRY_FAILED=1 retries plain failures)
-bash scripts/start_grobid.sh                # GROBID 0.9.1 CRF image on localhost:8070 (Docker in WSL)
-.venv/bin/python src/run_grobid.py          # TEI into data/tei/
-.venv/bin/python src/extract_contexts.py    # references, citation contexts, link checks -> data/day2/
-ONLY_NEEDED=1 .venv/bin/python src/resolve_refs.py   # Crossref + OpenAlex for cited works (~15 min)
-.venv/bin/python src/summarise_day2.py      # results/day2_summary.md
-```
+The `data/` folder is private. It holds other people's articles, and AI verdicts on identifiable
+papers, which this project won't publish until the judge is validated. The steps above rebuild it
+from public sources.
 
-## Day 3: judge (done 2026-11-22; results in `results/day3_summary.md`)
-
-Two judges from different model families: Claude Opus 5.5 and OpenAI's GPT-6.2 Sol.
-
-```bash
-uv pip install anthropic==2.12.0 openai==3.46.0   # openai pinned to a release at least two weeks old
-.venv/bin/python src/benchmark_ci.py        # Citation-Integrity test sample -> data/day3/ci_inputs.jsonl
-.venv/bin/python src/fetch_cited_texts.py   # 160 OJS citations sampled, open cited texts fetched -> ojs_inputs.jsonl (157)
-# Calibration: 10 benchmark items per judge; check the measured cost per item before going on
-.venv/bin/python src/judge_claude.py data/day3/ci_inputs.jsonl --limit 10 --budget 2
-.venv/bin/python src/judge_openai.py data/day3/ci_inputs.jsonl --limit 10 --budget 2
-# Full runs, each judge: the benchmark then the OJS citations, with a USD cap for each
-bash scripts/run_day3_full.sh claude 12 8
-bash scripts/run_day3_full.sh gpt 10 4
-.venv/bin/python src/score_benchmark.py data/day3/judgments/claude-opus-5-5 data/day3/judgments/gpt-6.2-sol
-.venv/bin/python src/summarise_day3.py data/day3/judgments/claude-opus-5-5 data/day3/judgments/gpt-6.2-sol
-```
-
-- `judge_prompt.py` holds the prompt, the output schema, quote verification and the
-  publication rules shared by every judge model, including the two-judge rule
-  (`combine`): a negative label stands only when both judges give one.
-- `judge_common.py` holds the budget ledger, `.env` loading and grouping by cited source.
-- Each judge writes one file per item under `data/day3/judgments/<model>/` and skips
-  items already there, refusals and errors included, so a run stopped by its budget resumes.
-- `--dry-run` builds the first request without calling the API. For `judge_openai.py` it
-  also checks the schema against strict structured outputs and the request parameters
-  against the installed SDK.
-- GPT-6.2 Sol costs $2 input and $10 output per million tokens, half of Claude Opus 5.5.
-  Other choices: `--model gpt-5.6-sol` (promotional price until 30 November 2026; from
-  1 December the ledger assumes the implied pre-promotion $5 and $30) and
-  `--model gpt-6.2-astra`, OpenAI's flagship, at four times 6.2 Sol's price.
-- `estimate_cost.py <judgments folder>` projects full-run costs from a calibration's usage.
-- Credentials: the OpenAI key goes in the git-ignored `.env` after `OPENAI_API_KEY=`
-  (the file has a commented template). Claude uses an `ant auth login` sign-in made in
-  Ubuntu, or an `ANTHROPIC_API_KEY` line in `.env`, which overrides the sign-in. Each
-  judge makes a free models call first and stops with a message if its credential fails.
-
-## Day 4: hand-check (kit built by `summarise_day3.py`)
-
-- `data/day4/handcheck_sheet.csv`: up to 50 English citations. Give each one label from the
-  seven in the item file, the minutes it took, and notes. Opens in Excel.
-- `data/day4/items/NN_<item>.md`: the citing context and the same source text the judges saw.
-- `data/day4/handcheck_key.csv`: the judges' labels and why each item was picked
-  (negative by both judges, by one, other disagreement, or a random agreed item).
-  Open it only after labelling, so the labels stay blind.
-
-## Politeness and safety
-
-- User-Agent `ojs-citation-pilot/0.1` with no personal details. One worker per host,
-  1–2 s between requests to the same host, and a page cap per journal.
-- robots.txt is respected for PDF downloads. Bot-protection pages are recorded, never bypassed.
-- XML is parsed with defusedxml. Text from journal sites is treated as untrusted input,
-  and later reaches a model only inside delimiters.
-- On certificate errors the harvester retries without TLS verification, for public
-  metadata only, and counts how often that happened.
-- `data/raw/` is git-ignored: it holds third-party content (OAI XML, PDFs) that is
-  analysed but must not be republished.
-
-## Layout
-
-| Path | Contents |
-|---|---|
-| `src/` | One script per step, plus `peek_results.py` and `check_day2_prereqs.py` helpers |
-| `data/raw/` | Downloads: DOAJ list, OAI responses, PDFs (git-ignored) |
-| `data/sample/` | Frame counts, candidates, harvest status, the 30 journals and 50 articles |
-| `data/records_recent.csv` | One row per 2025–26 record from the 99 active journals |
-| `results/` | Write-ups for each day |
+The scripts identify themselves, pause between requests to the same site, respect robots.txt
+for downloads and never get around bot protection.

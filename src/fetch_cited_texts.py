@@ -206,7 +206,7 @@ def main():
              "- Evidence available for the sampled citations: "
              + ", ".join(f"{k} {v}" for k, v in outcome.items()) + ".",
              f"- Judge inputs written: {len(items)} ({n_en} English, {len(items) - n_en} Spanish)."]
-    Path("results/day3_prep.md").write_text("\n".join(lines) + "\n")
+    (OUT / "prep.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
 
